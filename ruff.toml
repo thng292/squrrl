@@ -1,0 +1,48 @@
+# Set the maximum line length to 79.
+include = [
+    "pyproject.toml",
+    "src/**/*.py",
+    "scripts/**/*.py",
+    "templates/**/*.py",
+    "templates/**/*.py.mako",
+    "alembic/**/*.py",
+]
+line-length = 80
+
+[lint]
+# Add the `line-too-long` rule to the enforced rule set.
+extend-select = [
+    "E501",
+    "UP",   # pyupgrade
+    "D",    # pydocstyle
+    "B",    # flake8-bugbear
+    "SIM",  # flake8-simplify
+    "I",    # isort 
+]
+extend-ignore = ["UP007", "UP035", "UP045", "F401"]
+
+[lint.pydocstyle]
+convention = "google"
+
+[lint.isort]
+combine-as-imports = true
+detect-same-package = true
+force-to-top = ["src", "."]
+length-sort = true
+lines-after-imports = 2
+order-by-type = true
+relative-imports-order = "closest-to-furthest"
+section-order = [
+    "future",
+    "first-party",
+    "local-folder",
+    "standard-library",
+    "third-party",
+]
+
+[format]
+quote-style = "double"
+indent-style = "space"
+docstring-code-format = true
+docstring-code-line-length = 20
+skip-magic-trailing-comma = false
