@@ -3,7 +3,8 @@ from __future__ import annotations
 from typing import (
     Any,
     Literal,
-    Generic,
+    Protocol,
+    runtime_checkable,
     TypeVar,
     Annotated,
     TypedDict,
@@ -11,7 +12,6 @@ from typing import (
     NotRequired,
     LiteralString,
 )
-from abc import abstractmethod, ABC
 from functools import cached_property
 from dataclasses import dataclass
 
@@ -34,58 +34,197 @@ class SupportedStatement(str, enum.Enum):
     DELETE = "DELETE"
 
 
-class Pathable(Generic[T]):
-    _path: list[LiteralString]
-    _inner: T
+@runtime_checkable
+class Pathable(Protocol):
+    """A protocol for objects that can return their path string."""
+
+    def get_str(self) -> LiteralString: ...
+
+
+# ---------------------------------------------------------------------------
+# 2. Implement the Field as a Descriptor
+# ---------------------------------------------------------------------------
+class Field(Pathable):
+    """
+    A descriptor representing a table field.
+
+    Its __get__ method is triggered on class access (e.g., MyTable.my_field),
+    allowing it to return a new Field instance with a path prefixed
+    by the table's path.
+    """
 
     def __init__(
-        self, name: LiteralString, inner: T, /, old_p: Pathable | None = None
+        self, name: LiteralString, prev: LiteralString | None = None
     ) -> None:
-        if old_p is not None:
-            self._path = old_p._path + [name]
-        else:
-            self._path = [name]
-        self._inner = inner
+        # The actual column name, e.g., "id", "name"
+        self.field_name = name
+        # The fully-qualified path, e.g., "tests.id"
+        self._path = f"{prev}.{name}" if prev else name
 
     def get_str(self) -> LiteralString:
-        return ".".join(self._path)
+        """Returns the fully-qualified path of the field."""
+        return self._path
+
+    def __get__(self, obj: Any, objtype: type | None = None) -> "Field":
+        """
+        Called on class access (e.g., TestTable.id).
+        `obj` is None, `objtype` is the class (TestTable).
+        """
+        if obj is None:
+            # objtype is the class (e.g., TestTable).
+            # We call its get_str() to get its path ("tests").
+            table_path = objtype.get_str()
+            # Return a *new* Field instance bound to this table path.
+            return Field(self.field_name, prev=table_path)
+
+        # Instance access (e.g., my_table_instance.id) is not supported here.
+        raise AttributeError(
+            "Field can only be accessed on the class, not an instance."
+        )
+
+    def _bind_prefix(self, prefix: LiteralString) -> "Field":
+        """
+        A helper used by TableWrapper to create a new Field
+        with a schema-qualified path.
+        """
+        return Field(self.field_name, prev=prefix)
 
 
-class Field:
-    def __init__(
-        self, name: LiteralString, /, prev: LiteralString | None = None
-    ) -> None:
-        self.name = name
-        if prev is not None:
-            self.path = prev + "." + name
-        else:
-            self.path = name
+# ---------------------------------------------------------------------------
+# 3. Implement the TableWrapper (for Schema-qualified Tables)
+# ---------------------------------------------------------------------------
+class TableWrapper(Pathable):
+    """
+    A proxy object that wraps a Table class when it's defined
+    inside a Schema. It overrides the path and field access.
+    """
+
+    def __init__(self, path: LiteralString, original_table: Type["Table"]):
+        self._path: LiteralString = path
+        self._original_table = original_table
+
+    def get_str(self) -> LiteralString:
+        """Returns the schema-qualified table path (e.g., "TestSchema.tests")."""
+        return self._path
+
+    def __getattr__(self, name: str) -> Field:
+        """
+        Called on field access (e.g., TestSchema.test_table.id).
+        'name' will be "id".
+        """
+        # Get the *original* Field descriptor from the *original* table
+        original_field_descriptor = getattr(self._original_table, name)
+
+        if isinstance(original_field_descriptor, Field):
+            # Ask the original field to create a *new* copy of itself,
+            # but bound to *this wrapper's* path.
+            return original_field_descriptor._bind_prefix(self._path)
+
+        raise AttributeError(f"'{self._path}' has no field '{name}'")
 
 
-class Table(Field, enum.Enum):
-    pass
+# ---------------------------------------------------------------------------
+# 4. Implement Metaclasses for Table and Schema
+# ---------------------------------------------------------------------------
+class TableMeta(type):
+    """
+    Metaclass for Table. Intercepts class creation to:
+    1. Determine the table's path (from Meta.table_name or class name).
+    2. Store this path in `_path` on the class.
+    3. Add a `get_str()` classmethod to the class.
+    """
+
+    def __new__(cls, name: str, bases: tuple, attrs: dict):
+        # 1. Determine table path
+        meta = attrs.get("Meta")
+        table_name = getattr(meta, "table_name", None) or name.lower()
+
+        # 2. Store path on the class
+        attrs["_path"] = table_name
+
+        # Create the new class (e.g., TestTable)
+        new_class = super().__new__(cls, name, bases, attrs)
+
+        # 3. Add get_str() classmethod
+        def get_str(cls_or_self) -> LiteralString:
+            return cls_or_self._path
+
+        # Bind the method to the new class
+        new_class.get_str = classmethod(get_str)
+
+        return new_class
 
 
-class Schema(type[Table], enum.Enum):
-    pass
+class SchemaMeta(type):
+    """Metaclass for Schema. Intercepts class creation to.
+
+    1. Determine the schema's path (from Meta.table_name or class name).
+    2. Store this path in `_path`.
+    3. Add a `get_str()` classmethod.
+    4. Find all `Table` attributes and replace with `TableWrapper` instances.
+    """
+
+    def __new__(cls, name: str, bases: tuple, attrs: dict):
+        # 1. Determine schema path
+        meta = attrs.get("Meta")
+        schema_name = getattr(meta, "table_name", None) or name
+
+        # 2. Store path
+        attrs["_path"] = schema_name
+
+        # Create a copy to hold the new attributes (with wrappers)
+        wrapped_attrs = attrs.copy()
+
+        # 4. Find and replace Table attributes
+        for attr_name, attr_value in attrs.items():
+            # Check if it's a class AND a subclass of Table
+            is_table_subclass = isinstance(attr_value, type) and any(
+                issubclass(b, Table) for b in attr_value.__mro__ if b is Table
+            )
+
+            if is_table_subclass:
+                # `attr_value` is the Table class (e.g., TestTable)
+                # Get its base path (e.g., "tests")
+                table_base_path = attr_value.get_str()
+
+                # Create the new schema-qualified path
+                wrapper_path = f"{schema_name}.{table_base_path}"
+
+                # Create the wrapper and put it in the class attributes
+                wrapper = TableWrapper(
+                    path=wrapper_path, original_table=attr_value
+                )
+                wrapped_attrs[attr_name] = wrapper
+
+        # Create the new class (e.g., TestSchema) using the *wrapped* attrs
+        new_class = super().__new__(cls, name, bases, wrapped_attrs)
+
+        # 3. Add get_str() classmethod
+        def get_str(cls_or_self) -> LiteralString:
+            return cls_or_self._path
+
+        new_class.get_str = classmethod(get_str)
+
+        return new_class
 
 
-class TestTable(Table):
-    pk = Field("pk")
-    id = Field("id")
-    name_ = Field("name")
-    salary = Field("salary")
+# ---------------------------------------------------------------------------
+# 5. Define Base Classes using the Metaclasses
+# ---------------------------------------------------------------------------
+class Table(metaclass=TableMeta):
+    # These are added by the metaclass, but defined here for type hinting
+    _path: LiteralString
+
+    @classmethod
+    def get_str(cls) -> LiteralString: ...
 
 
-class TestSchema(Schema):
-    test_table = TestTable
+class Schema(metaclass=SchemaMeta):
+    # These are added by the metaclass, but defined here for type hinting
+    _path: LiteralString
 
-
-t = TestSchema.test_table.id
-
-
-def shit(f: Field):
-    pass
+    @classmethod
+    def get_str(cls) -> LiteralString: ...
 
 
 @dataclass(frozen=True)
