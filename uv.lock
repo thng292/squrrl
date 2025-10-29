@@ -129,9 +129,17 @@ pydantic = [
     { name = "pydantic" },
 ]
 
+[package.dev-dependencies]
+dev = [
+    { name = "squrrl" },
+]
+
 [package.metadata]
 requires-dist = [{ name = "pydantic", marker = "extra == 'pydantic'" }]
 provides-extras = ["pydantic"]
+
+[package.metadata.requires-dev]
+dev = [{ name = "squrrl", virtual = "." }]
 
 [[package]]
 name = "typing-extensions"

@@ -8,3 +8,11 @@ dependencies = []
 
 [project.optional-dependencies]
 pydantic = ["pydantic"]
+
+[dependency-groups]
+dev = [
+    "squrrl",
+]
+
+[tool.uv.sources]
+squrrl = { workspace = true }

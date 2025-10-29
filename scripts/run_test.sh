@@ -1,0 +1,1 @@
+uv run -m unittest discover -s src -p *_test.py

@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 from . import core
-from .constructor import SqlStrWPararms, construct_sql_str
+from .constructor import construct_sql_str
 
 from copy import deepcopy
 from typing import Generic, TypeVar, Protocol, LiteralString
@@ -13,7 +13,7 @@ T = TypeVar("T", bound=core.Statement)
 class _WithContext(Protocol, Generic[T]):
     statement: T
 
-    def construct_sql(self, indent: int | None = None) -> SqlStrWPararms:
+    def construct_sql(self, indent: int | None = None) -> LiteralString:
         return construct_sql_str(self.statement, indent)
 
 

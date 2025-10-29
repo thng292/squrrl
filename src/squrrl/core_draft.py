@@ -36,7 +36,11 @@ class SupportedStatement(str, enum.Enum):
     DELETE = "DELETE"
 
 
-class Column:
+class SqlPart(Protocol):
+    def get_parts(self, indent: int) -> list[LiteralString]: ...
+
+
+class Column(SqlPart):
     """A descriptor representing a table column.
 
     It auto-infer its name from
@@ -44,13 +48,14 @@ class Column:
     """
 
     name: LiteralString | None
-    _prev: LiteralString | None
-    _path: LiteralString | None
+    schema_name: LiteralString | None
+    table_name: LiteralString | None
 
     def __init__(
         self,
         name: LiteralString | None = None,  # <-- Name is now optional
-        prev: LiteralString | None = None,
+        table_name: LiteralString | None = None,
+        schema_name: LiteralString | None = None,
     ) -> None:
         """Represent a column in the database.
 
@@ -62,8 +67,11 @@ class Column:
         """
         self.name = name
         # Store prev so __set_name__ can use it later
-        self._prev = prev
-        self._path = f"{prev}.{name}" if prev and name else name
+        self.schema_name = schema_name
+        self.table_name = table_name
+
+    def get_parts(self, indent: int) -> list[LiteralString]:
+        return [self.get_path()]
 
     def __set_name__(self, owner: type[Any], name: LiteralString) -> None:
         """Called when the Field is assigned to a class attribute.
@@ -74,19 +82,18 @@ class Column:
         # If the user didn't provide a name in __init__ (it's None)...
         if self.name is None:
             self.name = name
-            self._path = (
-                f"{self._prev}.{self.name}" if self._prev else self.name
-            )
 
     def get_path(self) -> LiteralString:
         """Returns the fully-qualified path of the field."""
-        if self._path is None:
+        if self.name is None:
             # name was None and __set_name__ never ran
             raise AttributeError(
                 "Field was not properly initialized. "
                 "Ensure it is assigned as a class attribute."
             )
-        return self._path
+        return utils._cat(
+            self.schema_name, self.table_name, self.name, delim="."
+        )
 
     def __get__(self, obj: Any, objtype: type | None = None) -> Column:
         """Called on class access (e.g., TestTable.id).
@@ -98,23 +105,27 @@ class Column:
                 raise AttributeError(
                     "Field has no name. Was it assigned to a class attribute?"
                 )
-
             table_path = objtype.get_path()
-            return Column(self.name, prev=table_path)
+            return Column(self.name, table_name=table_path)
 
         # Instance access (e.g., my_table_instance.id) is not supported here.
         raise AttributeError(
             "Field can only be accessed on the class, not an instance."
         )
 
-    def _bind_prefix(self, prefix: LiteralString) -> Column:
+    def _bind_prefix(
+        self, table_name: LiteralString, schema_name: LiteralString | None
+    ) -> Column:
         """Used by TableWrapper to create new Column with schema path."""
         if self.name is None:
             raise AttributeError(
                 "Canot bind an unnamed Field.\n"
                 "Field has no name. Was it assigned to a class attribute?"
             )
-        return Column(self.name, prev=prefix)
+        return Column(self.name, table_name, schema_name)
+
+    def AS(self, name: LiteralString) -> ALIAS:
+        return ALIAS(name, self)
 
 
 class TableMeta(type):
@@ -127,14 +138,12 @@ class TableMeta(type):
     def __new__(cls, name: str, bases: tuple, attrs: dict):
         meta = attrs.get("Meta")
         table_name = str(getattr(meta, "table_name", None) or name.lower())
-
-        if "_path" not in attrs:
-            # Has not been set by SchemaMeta
-            attrs["_path"] = table_name
+        attrs["_table_name"] = table_name
+        attrs["_schema_name"] = None
         new_class = super().__new__(cls, name, bases, attrs)
         return new_class
 
-    def __getattr__(cls, name: str) -> Column:
+    def __getattr__(cls: type[Table], name: str) -> Column:
         """Called on field access (e.g., TestSchema.test_table.id).
 
         'name' will be "id".
@@ -145,17 +154,29 @@ class TableMeta(type):
         if isinstance(original_field_descriptor, Column):
             # Ask the original field to create a *new* copy of itself,
             # but bound to *this wrapper's* path.
-            return original_field_descriptor._bind_prefix(cls._path)
+            return original_field_descriptor._bind_prefix(
+                cls._table_name, cls._schema_name
+            )
 
         raise AttributeError(f"'{cls._path}' has no field '{name}'")
 
 
 class Table(metaclass=TableMeta):
-    _path: LiteralString
+    _schema_name: LiteralString | None
+    _table_name: LiteralString
 
     @classmethod
     def get_path(cls) -> LiteralString:
-        return cls._path
+        return utils._cat(cls._schema_name, cls._table_name, delim=".")
+
+    @classmethod
+    def JOIN(cls: type[Table], other: type[Table]) -> type[Table]:
+        class Shit(cls): ...
+
+        return cls
+
+    @classmethod
+    def get_parts(cls, indent: int) -> list[LiteralString]: ...
 
 
 class SchemaMeta(type):
@@ -172,7 +193,7 @@ class SchemaMeta(type):
         schema_name = getattr(meta, "schema_name", None) or name
 
         # 2. Store path
-        attrs["_path"] = schema_name
+        attrs["_schema_name"] = schema_name
 
         # Create a copy to hold the new attributes (with wrappers)
         wrapped_attrs = attrs.copy()
@@ -189,7 +210,7 @@ class SchemaMeta(type):
                 new_path = f"{schema_name}.{table_base_path}"
                 # Preserve Meta class and other stuff
                 new_dict = original_table.__dict__.copy()
-                new_dict["_path"] = new_path
+                new_dict["_schema_name"] = new_path
 
                 # Create a new class inherited from the user defined class
                 proxy_class = type(
@@ -207,14 +228,13 @@ class SchemaMeta(type):
         return new_class
 
 
-@dataclass
 class Schema(metaclass=SchemaMeta):
     # These are added by the metaclass, but defined here for type hinting
-    _path: LiteralString
+    _schema_name: LiteralString
 
     @classmethod
     def get_path(cls) -> LiteralString:
-        return cls._path
+        return cls._schema_name
 
 
 @dataclass(frozen=True)
@@ -237,28 +257,24 @@ class Param:
             return Param.Config.param_str
 
 
-def is_str(o: Any) -> TypeGuard[str]:
-    """Check if an object is a str."""
-    return isinstance(o, str)
+class ALIAS(SqlPart):
+    expr: LiteralString | Column | type[Table] | None
+    alias: LiteralString
 
+    def __init__(self, name: LiteralString, column: Column) -> None:
+        super().__init__(column.name, column._prev)
+        self.alias = name
 
-def is_column(o: Any) -> TypeGuard[Column]:
-    """Check if an object is a Field."""
-    return isinstance(o, Column)
+    def get_path(self) -> LiteralString:
+        return super().get_path()
 
-
-def is_table(o: Any) -> TypeGuard[Table]:
-    """Check if an object is a Table."""
-    return isinstance(o, Table)
-
-
-def is_param(o: Any) -> TypeGuard[Param]:
-    """Check if an object is a parameter."""
-    return isinstance(o, Param)
-
-
-class SqlPart(Protocol):
-    def get_parts(self, indent: int) -> list[LiteralString]: ...
+    def get_parts(self, indent: int) -> list[LiteralString]:
+        res = super().get_parts(indent)
+        if len(res) == 1:
+            return [f"({res[0]}) AS f{self.alias}"]
+        else:
+            res = utils._add_indent(res, indent)
+            return ["(", *res, f") AS {self.alias}"]
 
 
 OPERATOR = (
@@ -278,6 +294,8 @@ OPERATOR = (
     ]
     | LiteralString
 )
+
+EXPRESSION = LiteralString
 
 
 class Condition(SqlPart):
@@ -324,199 +342,41 @@ class Condition(SqlPart):
         res._prev = {"cond": self, "op": "OR"}
         return res
 
-    @staticmethod
-    def process_le_ri(
-        side: Param | EXPRESSION, indent: int
-    ) -> list[LiteralString]:
-        if isinstance(side, str):
-            return [side]
-        elif is_column(side):
-            return [side.get_path()]
-        elif is_param(side):
-            return [side.placeholder]
-        else:
-            return side.get_parts()
+    def get_parts(self, indent: int) -> list[LiteralString]: ...
 
-    def get_parts(self, indent: int) -> list[LiteralString]:
-        # TODO: False
-        lines: list[LiteralString] = []
-        le = self.process_le_ri(self.le, indent)
-        ri = self.process_le_ri(self.le, indent)
-        if len(le) == 1:
-            lines.append(le[0])
-        else:
-            le[0] = "(" + le[0]
-            le[-1] += ") " + self.op + " "
-            lines.extend(utils._add_indent(le, indent))
 
-        if len(ri) == 1:
-            lines[-1] += ri[0]
-        else:
-            le[0] = "(" + le[0]
-            le[-1] += ") " + self.op + " "
-            lines.extend(utils._add_indent(le, indent))
-        return lines
+class FROM:
+    class JoinState(TypedDict):
+        type: LiteralString
+        natural: bool
+        table: type[Table]
 
+    table: type[Table]
+    joins: JoinState | None
 
-class WHEN(TypedDict):
-    cond: EXPRESSION
-    then: EXPRESSION
+    def NATURAL(self): ...
 
+    def CROSS_JOIN(self): ...
 
-_CASE_ELSE = TypedDict("_CASE_ELSE", {"else": NotRequired[LiteralString]})
+    def JOIN(self): ...
 
+    def LEFT(self): ...
 
-class CASE(_CASE_ELSE):
-    case: EXPRESSION
-    whens: list[WHEN]
 
+class SELECT:
+    def __init__(self, *cols: Column) -> None:
+        pass
 
-_ALIAS_AS = TypedDict("_ALIAS_AS", {"as": LiteralString})
+    def FROM(self, *tables: type[Table]): ...
 
 
-class ALIAS(_ALIAS_AS):
-    expr: LiteralString | Statement_SELECT
+class WITH:
+    def SELECT(self, *cols: Column): ...
 
 
-WHERE = LOGIC_OP | LiteralString
-
-
-class WITH(TypedDict):
-    with_query: list[ALIAS]
-    recursive: NotRequired[bool]
-
-
-FRAME_CLAUSE_MODE = Literal["RANGE", "ROWS", "GROUPS"]
-
-FRAME_EXCLUSION = Literal["CURRENT ROW", "GROUP", "TIES", "NO OTHERS"]
-
-
-class FRAME_END_OFFSET(TypedDict):
-    offset: Param | LiteralString
-    dir: Literal["PRECEDING", "FOLLOWING"]
-
-
-FRAME_END = (
-    Literal["UNBOUNDED PRECEDING", "CURRENT ROW", "UNBOUNDED FOLLOWING"]
-    | FRAME_END_OFFSET
-)
-
-
-class FRAME_CLAUSE(TypedDict):
-    mode: FRAME_CLAUSE_MODE
-    start: FRAME_END
-    end: NotRequired[FRAME_END]
-    exclude: NotRequired[FRAME_EXCLUSION]
-
-
-class _WINDOW(_ALIAS_AS):
-    existing_window_name: NotRequired[LiteralString]
-    partition_by: NotRequired[list[LiteralString]]
-    order_by: NotRequired[list[ORDER_BY]]
-    frame_clause: NotRequired[FRAME_CLAUSE]
-
-
-WINDOW = _WINDOW | LiteralString
-
-
-class OVER_CLAUSE(_ALIAS_AS):
-    partition_by: NotRequired[list[LiteralString]]
-    order_by: NotRequired[ORDER_BY]
-    agg: LiteralString
-
-
-SELECT_EXPRESSION = list[LiteralString | ALIAS | OVER_CLAUSE] | Literal["*"]
-
-
-class SELECT_ALL(TypedDict):
-    mode: Literal["ALL"]  # ALL is default
-    expression: SELECT_EXPRESSION
-
-
-class SELECT_DISTINCT(TypedDict):
-    mode: Literal["DISTINCT"]
-    expression: SELECT_EXPRESSION
-    distinct_on: NotRequired[list[LiteralString]]
-
-
-SELECT_TYPE = Annotated[SELECT_ALL | SELECT_DISTINCT, Discriminator("mode")]
-SELECT = SELECT_TYPE | SELECT_EXPRESSION
-
-
-class JOIN_CONDITION_ON(TypedDict):
-    # type: Literal["ON"]
-    on: Condition
-
-
-class JOIN_CONDITION_USING(_ALIAS_AS):
-    # type: Literal["USING"]
-    using: list[LiteralString]
-
-
-JOIN_CONDITION = JOIN_CONDITION_ON | JOIN_CONDITION_USING
-
-
-class INNER_OUTER_JOIN(TypedDict):
-    type: Literal["FULL", "LEFT", "RIGHT", "INNER"]
-    cond: JOIN_CONDITION
-
-
-class NATURAL_JOIN(TypedDict):
-    type: Literal[
-        "NATURAL FULL", "NATURAL LEFT", "NATURAL RIGHT", "NATURAL INNER"
-    ]
-
-
-class CROSS_JOIN(TypedDict):
-    type: Literal["CROSS"]
-
-
-JOIN = INNER_OUTER_JOIN | NATURAL_JOIN | CROSS_JOIN
-
-
-class FROM_JOIN(TypedDict):
-    expr: list[LiteralString | ALIAS]
-    join: list[JOIN]
-
-
-FROM = FROM_JOIN | LiteralString
-
-
-class GROUP_BY(TypedDict):
-    mode: NotRequired[Literal["ALL", "DISTINCT"]]  # None is default
-    elems: list[LiteralString]  # TODO
-
-
-SET_OPERATION_MODE = Literal["ALL", "DISTINCT"]
-
-
-class SET_OPERATION(TypedDict):
-    op: Literal["UNION", "INTERSECT", "EXCEPT"]
-    mode: NotRequired[SET_OPERATION_MODE]  # distinct is default
-    select: Statement_SELECT
-
-
-class ORDER_BY(TypedDict):
-    col: LiteralString
-    order: NotRequired[Literal["ASC", "DESC"] | OPERATOR | LiteralString]
-    nulls: NotRequired[Literal["FIRST", "LAST"]]
-
-
-LIMIT = Param | LiteralString | Literal["ALL"]
-OFFSET = Param | LiteralString
-
-
-class FETCH_FIRST(TypedDict):
-    first: Param | LiteralString
-    with_ties: NotRequired[bool]
-
-
-class FETCH_NEXT(TypedDict):
-    next: Param | LiteralString
-    with_ties: NotRequired[bool]
-
-
-FETCH = FETCH_FIRST | FETCH_NEXT
+class SqlBuilder:
+    def WITH(self, *args): ...
+    def SELECT(self, *cols: Column): ...
 
 
 class Statement_SELECT(TypedDict):
@@ -535,33 +395,5 @@ class Statement_SELECT(TypedDict):
     FETCH: NotRequired[FETCH]
 
 
-class Statement_INSERT(TypedDict):
-    type: Literal[SupportedStatement.INSERT]
-    WITH: NotRequired[WITH]
-
-
-class Statement_UPDATE(TypedDict):
-    type: Literal[SupportedStatement.UPDATE]
-    WITH: NotRequired[WITH]
-    WHERE: NotRequired[Condition]
-
-
-class Statement_DELETE(TypedDict):
-    type: Literal[SupportedStatement.DELETE]
-    WITH: NotRequired[WITH]
-    WHERE: NotRequired[Condition]
-
-
-EXPRESSION = LiteralString | Column | Condition | CASE | Statement_SELECT
-
-Statement = Annotated[
-    Statement_SELECT | Statement_INSERT | Statement_UPDATE | Statement_DELETE,
-    Discriminator("type"),
-]
-
-
-def construct_empty_select_statement() -> Statement_SELECT:
-    return {
-        "type": SupportedStatement.SELECT,
-        "SELECT": "*",
-    }
+if __name__ == "__main__":
+    pass

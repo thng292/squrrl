@@ -191,7 +191,7 @@ def _construct_windows(windows: list[core.WINDOW]) -> list[LiteralString]:
     return parts
 
 
-def _construct_condition(c: core.CONDITION, indent: int) -> list[LiteralString]:
+def _construct_condition(c: core.Condition, indent: int) -> list[LiteralString]:
     parts = []
 
     def anon(side: Literal["le", "ri"]):
