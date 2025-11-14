@@ -55,10 +55,10 @@ class Statement_SELECT(TypedDict):
     FROM: NotRequired[FROM]
     WHERE: NotRequired[WHERE]
     GROUP_BY: NotRequired[GROUP_BY]
-    HAVING: NotRequired[WHERE]
+    HAVING: NotRequired[HAVING]
     WINDOW: NotRequired[list[WINDOW]]
     SET_OPERATIONS: NotRequired[list[SET_OPERATION]]
-    ORDER_BY: NotRequired[list[ORDER_BY]]
+    ORDER_BY: NotRequired[ORDER_BY]
     LIMIT: NotRequired[LIMIT]
     OFFSET: NotRequired[OFFSET]
     FETCH: NotRequired[FETCH]
@@ -367,15 +367,6 @@ class Schema(metaclass=SchemaMeta):
 #             return ["(", *res, f") AS {self.alias}"]
 
 
-class GROUP_BY(_SQLPart, _HasStateSelect):
-    def __init__(self) -> None:
-        super().__init__()
-
-    @override
-    def get_sql_parts(self, indent: int) -> LiteralString | list[LiteralString]:
-        return ""
-
-
 OPERATOR = (
     Literal[
         "IS",
@@ -504,7 +495,101 @@ SET_QUANTIFIER = Literal["ALL", "DISTINCT"]
 
 
 @final
-class WHERE(_SQLPart, _HasStateSelect):
+class ORDER_BY(_SQLPart, _HasStateSelect):
+    class OrderingBy(TypedDict):
+        expr: LiteralString | ColumnDerivable
+        by: Literal["ASC", "DESC"]
+        null: Literal["FIRST", "LAST"]
+
+    class OrderingUsing(TypedDict):
+        expr: LiteralString | ColumnDerivable
+        using: OPERATOR
+        null: Literal["FIRST", "LAST"]
+
+    Ordering = OrderingBy | OrderingUsing
+
+    def __init__(
+        self,
+        statement: Statement_SELECT,
+        *orders: Ordering | LiteralString | ColumnDerivable,
+    ) -> None:
+        self.statement = statement
+        self.statement["ORDER_BY"] = self
+        self.orders = list(orders)
+
+    @override
+    def get_sql_parts(self, indent: int) -> LiteralString | list[LiteralString]:
+        return ""
+
+
+@final
+class HAVING(_SQLPart, _HasStateSelect):
+    def __init__(
+        self, statement: Statement_SELECT, condition: Criterion
+    ) -> None:
+        self.statement = statement
+        self.statement["HAVING"] = self
+        self.condition = condition
+
+    @override
+    def get_sql_parts(self, indent: int) -> LiteralString | list[LiteralString]:
+        tmp = self.condition.get_sql_parts(indent)
+        res: list[LiteralString] = ["HAVING"]
+        if isinstance(tmp, list):
+            res.extend(utils.add_indent(tmp, indent))
+        else:
+            res.append(indent * " " + tmp)
+        return res
+
+
+class _Having_able(_HasStateSelect):
+    def HAVING(self, condition: Criterion):
+        return HAVING(self.statement, condition)
+
+
+@final
+class GROUP_BY(_Having_able, _SQLPart, _HasStateSelect):
+    GROUP_BY_MODE = Literal["ALL", "DISTINCT", None]
+
+    def __init__(
+        self,
+        statement: Statement_SELECT,
+        *cols: Column | LiteralString,
+        mode: GROUP_BY_MODE = None,
+    ) -> None:
+        self.statement = statement
+        self.cols = list(cols)
+        self.statement["GROUP_BY"] = self
+        self.mode = mode
+
+    @override
+    def get_sql_parts(self, indent: int) -> LiteralString | list[LiteralString]:
+        res: list[LiteralString] = []
+        if self.mode is not None:
+            res.append("GROUP BY " + self.mode)
+        else:
+            res.append("GROUP BY")
+        cols: list[LiteralString] = [
+            it if isinstance(it, str) else it.get_sql_parts(indent)
+            for it in self.cols
+        ]
+        res.extend(utils.add_indent(cols, indent))
+        return res
+
+
+class _GROUP_BY_able(_HasStateSelect):
+    def GROUP_BY(self, *cols: Column | LiteralString):
+        return GROUP_BY(self.statement, *cols)
+
+    def GROUP_BY_ALL(self, *cols: Column | LiteralString):
+        return GROUP_BY(self.statement, *cols, mode="ALL")
+
+    def GROUP_BY_DISTINCT(self, *cols: Column | LiteralString):
+        return GROUP_BY(self.statement, *cols, mode="DISTINCT")
+
+
+@final
+class WHERE(_GROUP_BY_able, _SQLPart, _HasStateSelect):
     def __init__(
         self, statement: Statement_SELECT, condition: Criterion
     ) -> None:
@@ -519,7 +604,7 @@ class WHERE(_SQLPart, _HasStateSelect):
         if isinstance(tmp, list):
             res.extend(utils.add_indent(tmp, indent))
         else:
-            res.append(tmp)
+            res.append(indent * " " + tmp)
         return res
 
 
@@ -539,11 +624,10 @@ class FROM(_WHERE_able, TableDerivable, _HasStateSelect):
 
     @override
     def get_sql_parts(self, indent: int) -> LiteralString | list[LiteralString]:
-        indent_ = indent * " "
         table = self.table.get_sql_parts(indent)
         res: list[LiteralString] = ["FROM"]
         if isinstance(table, str):
-            res.append(indent_ + table)
+            res.append(indent * " " + table)
         else:
             res.extend(utils.add_indent(table, indent))
 

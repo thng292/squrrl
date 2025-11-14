@@ -107,7 +107,7 @@ class TestCondition(unittest.TestCase):
         self.assertEqual(res, "employees.name = employees.dept")
 
 
-class TestFrom(unittest.TestCase):
+class TestWhere(unittest.TestCase):
     def test_0(self):
         res = (
             core.SqlBuilder.SELECT("*")
@@ -117,6 +117,37 @@ class TestFrom(unittest.TestCase):
         sql = res.get_sql()
         self.assertIsInstance(sql, str)
         self.assertEqual(sql, "SELECT * FROM employees WHERE 1 = 1")
+
+
+class TestGroupBy(unittest.TestCase):
+    def test_0(self):
+        res = (
+            core.SqlBuilder.SELECT("*")
+            .FROM(EmployeesTable)
+            .WHERE(core.Criterion("1", "=", "1"))
+            .GROUP_BY(EmployeesTable.name)
+        )
+        sql = res.get_sql()
+        self.assertIsInstance(sql, str)
+        self.assertEqual(
+            sql, "SELECT * FROM employees WHERE 1 = 1 GROUP BY employees.name"
+        )
+
+
+class TestHaving(unittest.TestCase):
+    def test_0(self):
+        res = (
+            core.SqlBuilder.SELECT("*")
+            .FROM(EmployeesTable)
+            .WHERE(core.Criterion("1", "=", "1"))
+            .GROUP_BY(EmployeesTable.name)
+            .HAVING(core.Criterion("1", "=", "1"))
+        )
+        sql = res.get_sql()
+        self.assertIsInstance(sql, str)
+        self.assertEqual(
+            sql, "SELECT * FROM employees WHERE 1 = 1 GROUP BY employees.name"
+        )
 
 
 # class TestCondition(unittest.TestCase):
