@@ -11,6 +11,7 @@ pydantic = ["pydantic"]
 
 [dependency-groups]
 dev = [
+    "pypika>=0.48.9",
     "squrrl",
 ]
 

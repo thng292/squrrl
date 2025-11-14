@@ -120,6 +120,12 @@ wheels = [
 ]
 
 [[package]]
+name = "pypika"
+version = "0.48.9"
+source = { registry = "https://pypi.org/simple" }
+sdist = { url = "https://files.pythonhosted.org/packages/c7/2c/94ed7b91db81d61d7096ac8f2d325ec562fc75e35f3baea8749c85b28784/PyPika-0.48.9.tar.gz", hash = "sha256:838836a61747e7c8380cd1b7ff638694b7a7335345d0f559b04b2cd832ad5378", size = 67259, upload-time = "2022-03-15T11:22:57.066Z" }
+
+[[package]]
 name = "squrrl"
 version = "0.1.0"
 source = { virtual = "." }
@@ -131,6 +137,7 @@ pydantic = [
 
 [package.dev-dependencies]
 dev = [
+    { name = "pypika" },
     { name = "squrrl" },
 ]
 
@@ -139,7 +146,10 @@ requires-dist = [{ name = "pydantic", marker = "extra == 'pydantic'" }]
 provides-extras = ["pydantic"]
 
 [package.metadata.requires-dev]
-dev = [{ name = "squrrl", virtual = "." }]
+dev = [
+    { name = "pypika", specifier = ">=0.48.9" },
+    { name = "squrrl", virtual = "." },
+]
 
 [[package]]
 name = "typing-extensions"
